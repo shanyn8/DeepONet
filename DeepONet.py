@@ -7,6 +7,8 @@ import unittest
 device = ("cuda" if torch.cuda.is_available()
           else "mps" if getattr(torch.backends, 'mps', None) and torch.backends.mps.is_available()
           else "cpu")
+dtype = torch.float32 if device == "mps" else torch.float64
+
 # print('Using device:', device)
 torch.set_default_dtype(torch.float32)
 _ = torch.manual_seed(1234)
@@ -17,11 +19,11 @@ _ = torch.manual_seed(1234)
 
     
 # === Config ===
-m_sensors   = 64      # number of Chebyshev sensors for branch input f
+N_sensors   = 64      # number of Chebyshev sensors for branch input f
+M_sensors   = 256     # number of Chebyshev sensors as quadrature points for Clenshaw Curtis Algorithm
 width       = 128     # feature width (branch/trunk)
 depth       = 3       # hidden layers in branch/trunk
 B_batch     = 16      # number of functions per batch (operator learning)
-N_col       = 256     # collocation points per function
 N_bc        = 2       # number of BC points per boundary per function
 steps       = 20    # training steps
 lr          = 1e-3    # learning rate
@@ -36,11 +38,7 @@ decay    = 0.8        # geometric decay factor for coeff magnitudes (0<decay<1)
 
 
 def cheb_sensors(m):
-    dtype = torch.float32 if device == "mps" else torch.float64
     j = torch.arange(m, dtype=dtype, device=device)
-    # j = torch.arange(m, dtype=torch.float64, device=device)
-    
-    # xi = torch.cos((2*j+1)*math.pi/(2*m))
     xi = torch.cos(j*math.pi/(m))
     return xi.to(torch.float32)
 
@@ -56,6 +54,34 @@ def chebyshev_diff_matrix(N: int):
     D = (c.unsqueeze(1) / c.unsqueeze(0)) / (dX + torch.eye(N, device=device))
     D = D - torch.diag(torch.sum(D, dim=1))
     return x, D
+
+
+# Weights for applying clenshaw_curtis quadrature rule
+def get_clenshaw_curtis_weights_mat(n: int) -> torch.Tensor:
+    """
+    Returns a diagonal matrix of Clenshaw-Curtis weights for n intervals (n+1 nodes).
+    Nodes are in descending order.
+    """
+    # Number of nodes
+    # N = n + 1
+    N = n
+    k = torch.arange(0, N, dtype=dtype)
+
+    # Compute weights using the explicit formula with correction factor
+    weights = torch.zeros(N, dtype=dtype)
+    m = N // 2  # floor(N/2)
+    for i in range(N):
+        s = 0.0
+        for j in range(1, m + 1):
+            bj = 0.5 if j == m and N % 2 == 0 else 1.0  # correction factor for last term
+            s += bj * (2 * math.cos(2 * j * i * math.pi / N)) / (4 * j**2 - 1)
+        weights[i] = (2 / N) * (1 - s)
+
+    # Reverse for descending Chebyshev nodes
+    weights = torch.flip(weights, dims=[0])
+
+    # Return diagonal matrix
+    return torch.diag(weights).to(device)
 
 
 # Weights for cheb nodes interpolation
@@ -85,9 +111,14 @@ def barycentric_interpolate_vectorized(x_k, f_k, w, x_eval):
     diff = x_eval[:, None] - x_k[None, :]  # shape (M, N+1)
     mask = diff == 0
     terms = w / diff
+    terms[mask] = 0  # zero out invalid terms
     num = torch.sum(terms * f_k, dim=1)
     den = torch.sum(terms, dim=1)
-    P = num / den
+
+    # Avoid division by zero
+    P = torch.where((den != 0) & (~torch.isinf(den)), num / den, torch.zeros_like(num))
+
+
     if mask.any():
         idx_eval, idx_k = torch.where(mask)
         P[idx_eval] = f_k[idx_k]
@@ -145,18 +176,18 @@ class DeepONet(nn.Module):
 # Need to fix f at first - random and then sample from these in batch minimization
 # f_sens = torch.randn(1, m_sensors, device=device)
 
-
 def generate_source_functions_matrix(x_k):
     # Random parameters a_i and b_i for each function f_i
-    a = torch.rand(steps)  # shape: (n,)
-    b = torch.rand(steps)  # shape: (n,)
+    a = torch.rand(steps).to(device)  # shape: (n,)
+    b = torch.rand(steps).to(device)  # shape: (n,)
 
     # Compute f_i(x) = b_i + a_i * x for each xi
     f_matrix = b.unsqueeze(1) + a.unsqueeze(1) * x_k.unsqueeze(0)  # shape: (n, m)
     return f_matrix
 
+## polynomial.chebyshev.chebval ?
 
-# Verify chebyshev points ASC/DESC
+# Verify chebyshev points - DESC
 # Batch minimization
 
 def train_step(iteration):
@@ -164,17 +195,18 @@ def train_step(iteration):
     ##                             Chebyshev Nodes                                ##
     ################################################################################
 
-    # Computes f(x1) ... f(xn) which are just random points as the values of f (what should be the range?)
-    f_sens = generate_source_functions_matrix[iteration]
-    x_sens = x_k.view(m_sensors, 1).to(device)  # Reshape x_k (m_sensors, 1)
+    f_sens = f_N[iteration - 1]
+    x_sens = x_N.view(N_sensors, 1).to(device)  # Reshape x_N (N_sensors, 1)
     
     # train on (m_sensors - 2) internal nodes
-    internal_cheb_sensors = x_sens[1:, -1]
-    internal_f_sens = f_sens[1:, -1]
+    internal_cheb_sensors = x_sens[1: -1]
+    internal_f_sens = f_sens[1: -1]
     # Model inference
     u_pred = model(internal_f_sens, internal_cheb_sensors)
     # Apply BC - zero paddings to first and last to get u(-1)=u(1)=0
-    u_pred = Functional.pad(u_pred, (1, 1), mode='constant', value=0)
+    # u_pred = Functional.pad(u_pred, (1, 1), mode='constant', value=0)
+
+    u_pred = Functional.pad(u_pred, (0, 0, 1, 1))  # no padding on columns, 1 on top, 1 on bottom
 
     
     ################################################################################
@@ -184,24 +216,28 @@ def train_step(iteration):
 
     # Clenshaw for quadrature rules
 
-    # ----------
-    x_eval  = -1 + 2*torch.rand(N_col, 1, device=device)
-    x_eval = x_eval.view(-1)
 
-    # I perform barycentric interpolation twice - once for u and once for f - makes sense?
-    u_eval = barycentric_interpolate_eval(x_sens.view(-1), u_pred.view(-1), x_eval)
-    f_eval = barycentric_interpolate_eval(x_sens.view(-1), f_sens.view(-1), x_eval)
+    x_eval = x_M.view(M_sensors, 1).to(device)  # Reshape x_M (M_sensors, 1)
+
+    u_eval = barycentric_interpolate_eval(x_sens.view(-1), u_pred.view(-1), x_eval.view(-1))
+    f_eval = barycentric_interpolate_eval(x_sens.view(-1), f_sens.view(-1), x_eval.view(-1))
 
     D2 = D @ D
     d2u = D2 @ u_pred
         
-    d2u_eval = barycentric_interpolate_eval(x_sens.view(-1), d2u.view(-1), x_eval)
+    d2u_eval = barycentric_interpolate_eval(x_sens.view(-1), d2u.view(-1), x_eval.view(-1))
 
     # Add test that f are all linear combinations of 2 functions - linar y=x and const y=c
-    # Minimize Loss by PDE Residual
-    # ----------
-    residual = d2u_eval + k_val**2 * u_eval - f_eval 
-    loss = mse(residual, torch.zeros_like(residual))  
+    # Minimize Loss by PDE Residual - Apply as MSE(y, y_hat)
+
+    # Differential operator
+    Lu = d2u_eval + k_val**2 * u_eval
+    Y_exact = math.sqrt(M_sensors + 1) * Q * Lu
+    Y_hat = math.sqrt(M_sensors + 1) * Q * f_eval 
+
+
+    loss = mse(Y_exact, Y_hat) 
+
     print(f"loss: {loss}")
     opt.zero_grad()
     loss.backward()
@@ -212,13 +248,16 @@ def train_step(iteration):
 
 if __name__ == '__main__':
 
-    x_k = cheb_sensors(m_sensors).to(device)        # (m,) Chebyshev sensors
-    model = DeepONet(m_sensors, width=width, depth=depth).to(device)
+    x_N = cheb_sensors(N_sensors).to(device)        # (m,) Chebyshev sensors
+    x_M = cheb_sensors(M_sensors).to(device)        # (m,) Chebyshev sensors
+    f_N = generate_source_functions_matrix(x_N)
+    model = DeepONet(N_sensors - 2, width=width, depth=depth).to(device)
     print(f"Num of model params: {sum(p.numel() for p in model.parameters())}")
 
     mse = nn.MSELoss()
     opt = torch.optim.Adam(model.parameters(), lr=lr)
-    _, D = chebyshev_diff_matrix(m_sensors - 1)    
+    _, D = chebyshev_diff_matrix(N_sensors)    
+    Q = get_clenshaw_curtis_weights_mat(M_sensors)
 
     hist = []
     t0 = time.time()
