@@ -22,7 +22,7 @@ width       = 128     # feature width (branch/trunk)
 depth       = 3       # hidden layers in branch/trunk
 B_batch     = 16      # number of functions per batch (operator learning)
 N_bc        = 2       # number of BC points per boundary per function
-steps       = 600    # training steps
+steps       = 1000    # training steps
 lr          = 1e-3    # learning rate
 # Distribution for k (avoid resonance k≈1 and sin(k)≈0 for the test analytic comparison)
 k_val = 5.0
@@ -35,7 +35,8 @@ decay    = 0.8        # geometric decay factor for coeff magnitudes (0<decay<1)
 # Branching of different strategies of the code
 forcing_function = True
 forced_boundary_conditions = True
-include_trunk_net = False
+include_trunk_net = True
+source_function_generation_strategy = 'forcing_function'    # forcing_function|random_linear
 
 
 def forcing_function(x):
@@ -200,21 +201,20 @@ class DeepONet(nn.Module):
 # f_sens = torch.randn(1, m_sensors, device=device)
 
 def generate_source_functions_matrix(x_k):
-    if forcing_function:
+    if source_function_generation_strategy == 'forcing_function':
         values = forcing_function(x_k)  # shape: (len(x),)
-        forcing_function_mat_values = values.unsqueeze(0).repeat(steps, 1)  # repeat along rows
-        return forcing_function_mat_values
-    # Random parameters a_i and b_i for each function f_i
-    a = torch.rand(steps).to(device)  # shape: (n,)
-    b = torch.rand(steps).to(device)  # shape: (n,)
+        return values.unsqueeze(0).repeat(steps, 1)  # repeat along rows
+    elif source_function_generation_strategy == 'random_linear':
+        # Random parameters a_i and b_i for each function f_i
+        a = torch.rand(steps).to(device)  # shape: (n,)
+        b = torch.rand(steps).to(device)  # shape: (n,)
+        return b.unsqueeze(1) + a.unsqueeze(1) * x_k.unsqueeze(0)  # shape: (n, m)
+    else:
+        raise ValueError(f"Invalid value: {source_function_generation_strategy}. Expected 'forcing_function' or 'random_linear'.")
 
-    # Compute f_i(x) = b_i + a_i * x for each xi
-    f_matrix = b.unsqueeze(1) + a.unsqueeze(1) * x_k.unsqueeze(0)  # shape: (n, m)
-    return f_matrix
 
 ## polynomial.chebyshev.chebval ?
 
-# Verify chebyshev points - DESC
 # Batch minimization
 
 def train_step(iteration):
@@ -243,16 +243,11 @@ def train_step(iteration):
     # print("d2u range:", d2u.min().item(), d2u.max().item())
 
     # Barycentric Intepolation - N cheb Nodes -> M cheb Nodes
-
     u_eval, f_eval, d2u_eval = apply_barycentric_interpolate(x_sens, x_eval, u_pred, f_sens, d2u)
-    # u_eval = barycentric_interpolate_eval(x_sens.view(-1), u_pred.view(-1), x_eval.view(-1))
-    # f_eval = barycentric_interpolate_eval(x_sens.view(-1), f_sens.view(-1), x_eval.view(-1)) 
-    # d2u_eval = barycentric_interpolate_eval(x_sens.view(-1), d2u.view(-1), x_eval.view(-1))
 
     if forced_boundary_conditions:
-        u_eval[1] = 0
+        u_eval[0] = 0
         u_eval[-1] = 0
-
 
     # # Differential operator
     Lu = d2u_eval + k_val**2 * u_eval
@@ -288,6 +283,24 @@ def train_step(iteration):
     return loss.item()
 
 
+def plot_forcing_function():
+    model.eval()
+    with torch.no_grad():
+        x_plot = x_N.view(N_sensors + 1, 1)
+        f_plot = f_N[0]
+        u_pred_plot = model(f_plot, x_plot)
+        u_exact_plot = exact_solution(x_plot)
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(x_plot.cpu().numpy(), u_pred_plot.cpu().numpy(), label='Predicted u(x)', linewidth=2)
+    plt.plot(x_plot.cpu().numpy(), u_exact_plot.cpu().numpy(), label='Exact u(x)', linestyle='--')
+    plt.title('DeepONet vs Exact Solution')
+    plt.xlabel('x')
+    plt.ylabel('u(x)')
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
 
 if __name__ == '__main__':
 
@@ -316,30 +329,12 @@ if __name__ == '__main__':
             dt = time.time()-t0
             print(f"iter {it:5d} | loss {L:.3e} | {dt:.1f}s")
 
-    # print('hist')
-    # print(hist)
-    # plt.figure(figsize=(5,3))
-    # plt.semilogy([h[0] for h in hist], label='total')
-    # # plt.semilogy([h[1] for h in hist], label='pde')
-    # # plt.semilogy([h[2] for h in hist], label='bc')
-    # plt.legend(); plt.title('Training loss'); plt.tight_layout(); plt.show()
 
-    model.eval()
-    with torch.no_grad():
-        x_plot = x_N.view(N_sensors + 1, 1)
-        f_plot = f_N[0]
-        u_pred_plot = model(f_plot, x_plot)
-        u_exact_plot = exact_solution(x_plot)
+    plt.figure(figsize=(5,3))
+    plt.semilogy([h for h in hist], label='loss')
+    plt.legend(); plt.title('Training loss'); plt.tight_layout(); plt.show()
 
-    plt.figure(figsize=(8, 5))
-    plt.plot(x_plot.cpu().numpy(), u_pred_plot.cpu().numpy(), label='Predicted u(x)', linewidth=2)
-    plt.plot(x_plot.cpu().numpy(), u_exact_plot.cpu().numpy(), label='Exact u(x)', linestyle='--')
-    plt.title('DeepONet vs Exact Solution')
-    plt.xlabel('x')
-    plt.ylabel('u(x)')
-    plt.grid(True)
-    plt.legend()
-    plt.tight_layout()
-    plt.show()
-    # add test with sampled u -> deduce f and verify zero loss
-    # Add test that f are all linear combinations of 2 functions - linar y=x and const y=c
+    if source_function_generation_strategy == 'forcing_function':
+        plot_forcing_function()
+
+
