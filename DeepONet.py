@@ -16,8 +16,8 @@ _ = torch.manual_seed(1234)
 
     
 # === Config ===
-N_sensors   = 10      # number of Chebyshev sensors for branch input f
-M_sensors   = 20     # number of Chebyshev sensors as quadrature points for Clenshaw Curtis Algorithm
+N_sensors   = 64      # number of Chebyshev sensors for branch input f
+M_sensors   = 1000     # number of Chebyshev sensors as quadrature points for Clenshaw Curtis Algorithm
 width       = 128     # feature width (branch/trunk)
 depth       = 3       # hidden layers in branch/trunk
 B_batch     = 16      # number of functions per batch (operator learning)
@@ -37,20 +37,77 @@ forcing_function = True
 forced_boundary_conditions = True
 include_trunk_net = True
 source_function_generation_strategy = 'forcing_function'    # forcing_function|random_linear
-
+forcing_function_type = 'sin_x'                             # sinus|polynomial
 
 def forcing_function(x):
-    # return torch.sin(torch.pi * x)
-    return -25*x**3 - 25*x**2 + 19*x + 23
+    if forcing_function_type == 'sin_x':
+        return torch.sin(torch.pi * x)
+    if forcing_function_type == 'polynomial':
+        return -25*x**3 - 25*x**2 + 19*x + 23
+    raise ValueError(f"Invalid value: {forcing_function_type}. Expected 'sinus' or 'polynomial'.")
 
-# The exact solution is u(x) = -*x**3 - *x**2 + *x + 1 satisfy BC
+
 def exact_solution(x):
-    return -1*x**3 - 1*x**2 + 1*x + 1
+    if forcing_function_type == 'polynomial':
+        return -1*x**3 - 1*x**2 + 1*x + 1
+    if forcing_function_type == 'sin_x':
+        pi_tensor = torch.tensor(torch.pi)  # make pi a tensor
+        k_tensor = torch.tensor(k_val, dtype=torch.float32)  # ensure k is a tensor
 
-def cheb_sensors(m):
-    j = torch.arange(m+1, dtype=dtype, device=device)
-    xi = torch.cos(j*math.pi/(m))
-    return xi.to(torch.float32)
+        denom = k_tensor**2 - pi_tensor**2
+        rhs = torch.sin(pi_tensor) / denom
+
+        # Compute sin and cos for k
+        sin_k = torch.sin(k_tensor)
+        cos_k = torch.cos(k_tensor)
+        sin_neg_k = torch.sin(-k_tensor)
+        cos_neg_k = torch.cos(-k_tensor)
+
+        # Build system matrix and RHS
+        M = torch.stack([
+            torch.tensor([sin_neg_k.item(), cos_neg_k.item()]),
+            torch.tensor([sin_k.item(), cos_k.item()])
+        ])
+        b = torch.tensor([-rhs.item(), -rhs.item()])
+
+        # Solve for A and B
+        AB = torch.linalg.solve(M, b)
+        A, B = AB[0], AB[1]
+
+        # Compute solution
+        u_p = torch.sin(pi_tensor * x) / denom
+        u_h = A * torch.sin(k_tensor * x) + B * torch.cos(k_tensor * x)
+        return u_p + u_h
+    raise ValueError(f"Invalid value: {forcing_function_type}. Expected 'sinus' or 'polynomial'.")
+
+
+def cheb_sensors(m, a=-1.0, b=1.0):
+    print(f"Generate {m+1} chebyshev sensors on [{a}, {b}]")
+    """
+    Generate Chebyshev nodes scaled to the interval [a, b].
+
+    Parameters:
+        m (int): Number of nodes (m+1 points will be generated).
+        a (float): Left endpoint of the interval.
+        b (float): Right endpoint of the interval.
+        dtype: Torch data type.
+        device: Torch device.
+    
+    Returns:
+        torch.Tensor: Chebyshev nodes in [a, b].
+    """
+    j = torch.arange(m + 1, dtype=dtype, device=device)
+    xi = torch.cos(j * math.pi / m)  # nodes in [-1, 1]
+    
+    # Scale from [-1, 1] to [a, b]
+    scaled_xi = 0.5 * (b - a) * xi + 0.5 * (b + a)
+    return scaled_xi.to(torch.float32)
+
+
+# def cheb_sensors(m):
+#     j = torch.arange(m+1, dtype=dtype, device=device)
+#     xi = torch.cos(j*math.pi/(m))
+#     return xi.to(torch.float32)
 
 
 def chebyshev_diff_matrix(N: int):
@@ -201,7 +258,9 @@ class DeepONet(nn.Module):
 # f_sens = torch.randn(1, m_sensors, device=device)
 
 def generate_source_functions_matrix(x_k):
+    print(f"Source function generation strategy: {source_function_generation_strategy}")
     if source_function_generation_strategy == 'forcing_function':
+        print(f"Forcing function: {forcing_function_type}")
         values = forcing_function(x_k)  # shape: (len(x),)
         return values.unsqueeze(0).repeat(steps, 1)  # repeat along rows
     elif source_function_generation_strategy == 'random_linear':
@@ -261,26 +320,23 @@ def train_step(iteration):
         loss_bc = mse(u_eval[0], torch.tensor([0.0], device=device)) + mse(u_eval[-1], torch.tensor([0.0], device=device))
         loss = loss_pde + loss_bc
 
-
-    # residual = Lu - f_eval
-    # loss_pde = mse(residual, torch.zeros_like(residual))
-    # loss_bc = mse(u_eval[0], torch.tensor([0.0], device=device)) + mse(u_eval[-1], torch.tensor([0.0], device=device))
-    # loss = loss_pde
-
-    # d2u = D2 @ u_pred
-    # print("d2u range:", d2u.min().item(), d2u.max().item())
-    # residual = d2u + k_val**2 * u_pred - f_sens
-    # loss_pde = mse(residual, torch.zeros_like(residual))
-    # loss_bc = mse(u_pred[0], torch.tensor([0.0], device=device)) + mse(u_pred[-1], torch.tensor([0.0], device=device))
-    # loss = loss_pde + loss_bc
- 
-
-    # print(f"loss: {loss}")
-    # print(f"loss_pde: {loss_pde}")
-    # opt.zero_grad()
     loss.backward() # verify gradients for MSE 
     opt.step()
     return loss.item()
+
+
+def get_plot_title():
+    source_function_generation_strategy = 'forcing_function'    # forcing_function|random_linear
+    if source_function_generation_strategy == 'random_linear':
+        return 'DeepONet vs Exact Solution - random linear source functions'
+
+    if source_function_generation_strategy == 'forcing_function':
+        if forcing_function_type == 'sin_x':
+            return 'DeepONet vs Exact Solution - sin(x) forcing source functions'
+        if forcing_function_type == 'polynomial':
+            return 'DeepONet vs Exact Solution - polynomial forcing source functions'
+
+    return 'unknown'
 
 
 def plot_forcing_function():
@@ -294,7 +350,7 @@ def plot_forcing_function():
     plt.figure(figsize=(8, 5))
     plt.plot(x_plot.cpu().numpy(), u_pred_plot.cpu().numpy(), label='Predicted u(x)', linewidth=2)
     plt.plot(x_plot.cpu().numpy(), u_exact_plot.cpu().numpy(), label='Exact u(x)', linestyle='--')
-    plt.title('DeepONet vs Exact Solution')
+    plt.title(get_plot_title())
     plt.xlabel('x')
     plt.ylabel('u(x)')
     plt.grid(True)
