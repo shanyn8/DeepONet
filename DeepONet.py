@@ -104,12 +104,6 @@ def cheb_sensors(m, a=-1.0, b=1.0):
     return scaled_xi.to(torch.float32)
 
 
-# def cheb_sensors(m):
-#     j = torch.arange(m+1, dtype=dtype, device=device)
-#     xi = torch.cos(j*math.pi/(m))
-#     return xi.to(torch.float32)
-
-
 def chebyshev_diff_matrix(N: int):
     x = torch.cos(torch.pi * torch.arange(N + 1, device=device) / N)
     c = torch.ones(N + 1, device=device)
@@ -288,9 +282,6 @@ def train_step(iteration):
     # Model inference
     opt.zero_grad()
     u_pred = model(f_sens, x_sens)
-    # print("u_pred range:", u_pred.min().item(), u_pred.max().item())
-   
-
     
     ################################################################################
     ##      Evaluation Points - M Cheb Nodes with Clenshew Curtis Weights         ##
@@ -299,7 +290,6 @@ def train_step(iteration):
 
     x_eval = x_M.view(M_sensors + 1, 1).to(device)  # Reshape x_M (M_sensors, 1)
     d2u = D2 @ u_pred
-    # print("d2u range:", d2u.min().item(), d2u.max().item())
 
     # Barycentric Intepolation - N cheb Nodes -> M cheb Nodes
     u_eval, f_eval, d2u_eval = apply_barycentric_interpolate(x_sens, x_eval, u_pred, f_sens, d2u)
@@ -308,7 +298,7 @@ def train_step(iteration):
         u_eval[0] = 0
         u_eval[-1] = 0
 
-    # # Differential operator
+    # Differential operator
     Lu = d2u_eval + k_val**2 * u_eval
     Y_exact = math.sqrt(M_sensors + 1) * Q * Lu
     Y_hat = math.sqrt(M_sensors + 1) * Q * f_eval 
