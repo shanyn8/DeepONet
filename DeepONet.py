@@ -8,10 +8,16 @@ device = ("cuda" if torch.cuda.is_available()
           else "mps" if getattr(torch.backends, 'mps', None) and torch.backends.mps.is_available()
           else "cpu")
 dtype = torch.float32 if device == "mps" else torch.float64
-
-# print('Using device:', device)
-torch.set_default_dtype(torch.float32)
+torch.set_default_dtype(torch.float32)  #TODO float64
 _ = torch.manual_seed(1234)
+
+print(f"dtype: {dtype}")
+print('Using device:', device)
+
+
+## polynomial.chebyshev.chebval ?
+# Batch minimization
+
 
 
     
@@ -22,7 +28,7 @@ width       = 128     # feature width (branch/trunk)
 depth       = 3       # hidden layers in branch/trunk
 B_batch     = 16      # number of functions per batch (operator learning)
 N_bc        = 2       # number of BC points per boundary per function
-steps       = 1000    # training steps
+steps       = 600    # training steps
 lr          = 1e-3    # learning rate
 # Distribution for k (avoid resonance k≈1 and sin(k)≈0 for the test analytic comparison)
 k_val = 5.0
@@ -34,13 +40,12 @@ decay    = 0.8        # geometric decay factor for coeff magnitudes (0<decay<1)
 
 # Branching of different strategies of the code
 forcing_function = True
-forced_boundary_conditions = True
 include_trunk_net = True
 source_function_generation_strategy = 'forcing_function'    # forcing_function|random_linear
-forcing_function_type = 'sin_x'                             # sinus|polynomial
+forcing_function_type = 'sinus'                             # sinus|polynomial
 
 def forcing_function(x):
-    if forcing_function_type == 'sin_x':
+    if forcing_function_type == 'sinus':
         return torch.sin(torch.pi * x)
     if forcing_function_type == 'polynomial':
         return -25*x**3 - 25*x**2 + 19*x + 23
@@ -50,7 +55,7 @@ def forcing_function(x):
 def exact_solution(x):
     if forcing_function_type == 'polynomial':
         return -1*x**3 - 1*x**2 + 1*x + 1
-    if forcing_function_type == 'sin_x':
+    if forcing_function_type == 'sinus':
         pi_tensor = torch.tensor(torch.pi)  # make pi a tensor
         k_tensor = torch.tensor(k_val, dtype=torch.float32)  # ensure k is a tensor
 
@@ -234,6 +239,8 @@ class DeepONet(nn.Module):
 
         # Final layer maps branch features to output_dim
         self.fc_out = nn.Linear(width, output_dim)
+        self.test_out = nn.Linear(m, output_dim)
+
         self.bias = nn.Parameter(torch.zeros(1))
 
     def forward(self, f_samples, x_points):
@@ -242,6 +249,8 @@ class DeepONet(nn.Module):
         if include_trunk_net:
             tfeat = self.trunk(x_points)          # (N, W)
             # Broadcast branch features to match trunk features
+            # combined = torch.matmul(bfeat, tfeat.T)      # elementwise product (batch_size, width)
+            # u = self.test_out(combined) + self.bias  # (batch_size, output_dim)
             u = (bfeat * tfeat).sum(dim=1, keepdim=True) + self.bias
         else:
             u = self.fc_out(bfeat) + self.bias  # (batch_size, output_dim)
@@ -266,49 +275,39 @@ def generate_source_functions_matrix(x_k):
         raise ValueError(f"Invalid value: {source_function_generation_strategy}. Expected 'forcing_function' or 'random_linear'.")
 
 
-## polynomial.chebyshev.chebval ?
+################################################################################
+##      Evaluation Points - M Cheb Nodes with Clenshew Curtis Weights         ##
+##      Convert Cheb Nodes to Eval points by Barycentric Interpolation        ##
+################################################################################
+def get_loss(u, f):
+    # Apply boundary conditions
+    # u_pred = Functional.pad(u_pred, (1, 1), mode='constant', value=0)
 
-# Batch minimization
-
-def train_step(iteration):
-    ################################################################################
-    ##                             Chebyshev Nodes                                ##
-    ################################################################################
-
-    f_sens = f_N[iteration - 1]
-    x_sens = x_N.view(N_sensors + 1, 1).to(device)  # Reshape x_N (N_sensors, 1)
-    
-
-    # Model inference
-    opt.zero_grad()
-    u_pred = model(f_sens, x_sens)
-    
-    ################################################################################
-    ##      Evaluation Points - M Cheb Nodes with Clenshew Curtis Weights         ##
-    ##      Convert Cheb Nodes to Eval points by Barycentric Interpolation        ##
-    ################################################################################
-
-    x_eval = x_M.view(M_sensors + 1, 1).to(device)  # Reshape x_M (M_sensors, 1)
-    d2u = D2 @ u_pred
-
+    d2u = D2 @ u
     # Barycentric Intepolation - N cheb Nodes -> M cheb Nodes
-    u_eval, f_eval, d2u_eval = apply_barycentric_interpolate(x_sens, x_eval, u_pred, f_sens, d2u)
+    u_eval, f_eval, d2u_eval = apply_barycentric_interpolate(x_sens, x_eval, u, f, d2u)
 
-    if forced_boundary_conditions:
-        u_eval[0] = 0
-        u_eval[-1] = 0
+    # # Apply boundary conditions
+    u_eval[0] = 0
+    u_eval[-1] = 0
 
     # Differential operator
     Lu = d2u_eval + k_val**2 * u_eval
     Y_exact = math.sqrt(M_sensors + 1) * Q * Lu
     Y_hat = math.sqrt(M_sensors + 1) * Q * f_eval 
 
-    if forced_boundary_conditions:
-        loss = mse(Y_exact, Y_hat) 
-    else:
-        loss_pde = mse(Y_exact, Y_hat)
-        loss_bc = mse(u_eval[0], torch.tensor([0.0], device=device)) + mse(u_eval[-1], torch.tensor([0.0], device=device))
-        loss = loss_pde + loss_bc
+    loss = mse(Y_exact, Y_hat) 
+    return loss
+
+
+def train_step(iteration):
+    # Get source function to train
+    f_sens = f_N[iteration - 1]
+
+    # Model inference
+    opt.zero_grad()
+    u_pred = model(f_sens, x_sens)
+    loss = get_loss(u_pred, f_sens)
 
     loss.backward() # verify gradients for MSE 
     opt.step()
@@ -321,7 +320,7 @@ def get_plot_title():
         return 'DeepONet vs Exact Solution - random linear source functions'
 
     if source_function_generation_strategy == 'forcing_function':
-        if forcing_function_type == 'sin_x':
+        if forcing_function_type == 'sinus':
             return 'DeepONet vs Exact Solution - sin(x) forcing source functions'
         if forcing_function_type == 'polynomial':
             return 'DeepONet vs Exact Solution - polynomial forcing source functions'
@@ -330,11 +329,14 @@ def get_plot_title():
 
 
 def plot_forcing_function():
+    if source_function_generation_strategy != 'forcing_function':
+        return
     model.eval()
     with torch.no_grad():
         x_plot = x_N.view(N_sensors + 1, 1)
         f_plot = f_N[0]
         u_pred_plot = model(f_plot, x_plot)
+        # u_pred_plot = Functional.pad(u_pred_plot, (1, 1), mode='constant', value=0)
         u_exact_plot = exact_solution(x_plot)
 
     plt.figure(figsize=(8, 5))
@@ -348,22 +350,34 @@ def plot_forcing_function():
     plt.tight_layout()
     plt.show()
 
+
+from decimal import Decimal
+def validate_loss_of_solution():
+    if source_function_generation_strategy != 'forcing_function':
+        return
+    f = forcing_function(x_N)
+    u = exact_solution(x_N)
+    loss = get_loss(u, f)
+    print("Exact solution loss: {:.3e}".format(loss))
+
 if __name__ == '__main__':
 
     x_N = cheb_sensors(N_sensors).to(device)        # (N,) Chebyshev sensors
+    x_sens = x_N.view(N_sensors + 1, 1).to(device)  # Reshape x_N (N_sensors, 1)
     x_M = cheb_sensors(M_sensors).to(device)        # (M,) Chebyshev sensors (Clenshew Curtis)
+    x_eval = x_M.view(M_sensors + 1, 1).to(device)  # Reshape x_M (M_sensors, 1)
     f_N = generate_source_functions_matrix(x_N)
     
-    model = DeepONet(N_sensors + 1, N_sensors + 1, width=width, depth=depth).to(device)
-    print(f"Num of model params: {sum(p.numel() for p in model.parameters())}")
-
-    mse = nn.MSELoss()
-    opt = torch.optim.Adam(model.parameters(), lr=lr)
     _, D = chebyshev_diff_matrix(N_sensors)   
     D2 = D @ D 
     Q = get_clenshaw_curtis_weights_mat(M_sensors)
-    # Q = torch.eye(M_sensors, device=device)  # identity matrix
 
+    model = DeepONet(N_sensors + 1, N_sensors + 1, width=width, depth=depth).to(device)
+    print(f"Num of model params: {sum(p.numel() for p in model.parameters())}")
+    mse = nn.MSELoss()
+    opt = torch.optim.Adam(model.parameters(), lr=lr)
+
+    validate_loss_of_solution()
 
     hist = []
     t0 = time.time()
@@ -380,7 +394,7 @@ if __name__ == '__main__':
     plt.semilogy([h for h in hist], label='loss')
     plt.legend(); plt.title('Training loss'); plt.tight_layout(); plt.show()
 
-    if source_function_generation_strategy == 'forcing_function':
-        plot_forcing_function()
+
+    plot_forcing_function()
 
 

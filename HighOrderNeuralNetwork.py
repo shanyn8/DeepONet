@@ -277,6 +277,8 @@ def train_step(iteration):
     #     u_eval[-1] = 0
 
     # Differential operator
+    # change loss to use sum of f_j the samples
+    # θ∗ = argminθ mjax ∥LNhOp[θ]fj − fj∥.
     L_composed_on_L_inverse = d2L_inverse_eval + k_val**2 * L_inverse_eval
     Y_exact = math.sqrt(M_sensors + 1) * Q * L_composed_on_L_inverse
     Y_hat = math.sqrt(M_sensors + 1) * Q * torch.eye(M_sensors+1, device=device) 
