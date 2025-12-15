@@ -292,8 +292,6 @@ class DeepONetMathTests(unittest.TestCase):
         
         self.assertEqual(u_eval.shape, (M_sensors ,),
                         f"u_eval shape mismatch: {u_eval.shape}")
-        self.assertEqual(f_eval.shape, (M_sensors ,),
-                        f"f_eval shape mismatch: {f_eval.shape}")
         self.assertEqual(d2u_eval.shape, (M_sensors ,),
                         f"d2u_eval shape mismatch: {d2u_eval.shape}")
         
@@ -305,12 +303,9 @@ class DeepONetMathTests(unittest.TestCase):
                         f"Q shape mismatch: {Q.shape}")
         
         Y_exact = math.sqrt(M_sensors + 1) * Q * Lu
-        Y_hat = math.sqrt(M_sensors + 1) * Q * f_eval
         
         self.assertEqual(Y_exact.shape, (M_sensors ,),
                         f"Y_exact shape mismatch: {Y_exact.shape}")
-        self.assertEqual(Y_hat.shape, (M_sensors ,),
-                        f"Y_hat shape mismatch: {Y_hat.shape}")
 
     def test_interpolation_preserves_exact_solution_at_nodes(self):
         """Test that interpolation preserves exact values at Chebyshev nodes."""
@@ -731,12 +726,13 @@ class DeepONetMathTests(unittest.TestCase):
         
         u_exact = polynomial_exact_solution(x_N)
         f_exact = polynomial_forcing_function(x_N)
-        
+        f_eval = polynomial_forcing_function(x_M)
+
         barycentric_weights = barycentric_weights_cheb(x_N)
 
         d2u = D2 @ u_exact
-        u_eval, f_eval, d2u_eval = apply_barycentric_interpolate(
-            x_sens, x_eval, barycentric_weights, u_exact, f_exact, d2u
+        u_eval, d2u_eval = apply_barycentric_interpolate(
+            x_sens, x_eval, barycentric_weights, u_exact, d2u
         )
         
         Lu = d2u_eval + k_val**2 * u_eval
@@ -791,8 +787,9 @@ class DeepONetMathTests(unittest.TestCase):
         u_N = polynomial_exact_solution(x_N)
         u_M_exact = polynomial_exact_solution(x_M)
         
+        barycentric_weights = barycentric_weights_cheb(x_N)
         # Interpolate
-        u_M_interpolated = barycentric_interpolate_eval(x_N, u_N, x_M)
+        u_M_interpolated = barycentric_interpolate_eval(x_N, u_N, x_M, barycentric_weights)
         
         error = torch.abs(u_M_interpolated - u_M_exact)
         max_error = torch.max(error).item()

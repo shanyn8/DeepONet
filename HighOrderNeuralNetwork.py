@@ -60,7 +60,7 @@ def build_covariance_matrix(X, length_scale=0.1):
 # Sample random functions from a Gaussian Process with squared-exponential kernel.
 def generate_source_functions_matrix(X, length_scale=0.1):
     num_functions = steps   # sample f for each train step
-    num_points = N_sensors + 1
+    num_points = N_sensors
 
     # Build covariance matrix using the kernel
     K = build_covariance_matrix(X, length_scale)
@@ -254,7 +254,7 @@ def train_step(iteration):
     ################################################################################
 
     f_sens = f_N[iteration - 1]
-    x_sens = x_N.view(N_sensors + 1, 1).to(device)  # Reshape x_N (N_sensors, 1)
+    x_sens = x_N.view(N_sensors, 1).to(device)  # Reshape x_N (N_sensors, 1)
 
     # Model inference
     opt.zero_grad()
@@ -311,7 +311,7 @@ if __name__ == '__main__':
     f_N = generate_source_functions_matrix(x_N)
     
     plot_sample_functions(x_N, f_N)
-    model = DeepONet(N_sensors + 1, N_sensors + 1, width=width, depth=depth).to(device)
+    model = DeepONet(N_sensors, N_sensors, width=width, depth=depth).to(device)
     print(f"Num of model params: {sum(p.numel() for p in model.parameters())}")
 
     mse = nn.MSELoss()

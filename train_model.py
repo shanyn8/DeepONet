@@ -29,7 +29,7 @@ def cheb_sensors(m, device='mps', dtype=torch.float32, a=-1.0, b=1.0):
     
     # Scale from [-1, 1] to [a, b]
     scaled_xi = 0.5 * (b - a) * xi + 0.5 * (b + a)
-    return scaled_xi.to(torch.float32)
+    return scaled_xi
 
 
 def chebyshev_diff_matrix(N, device='mps', dtype=torch.float32):
@@ -39,7 +39,7 @@ def chebyshev_diff_matrix(N, device='mps', dtype=torch.float32):
     # """
     if N < 2:
         raise ValueError(f"N must be >= 2, got {N}")
-    x = cheb_sensors(N)
+    x = cheb_sensors(N, device, dtype)
     c = torch.ones(N, device=device, dtype=dtype)
     c[0], c[-1] = 2, 2
     c = c * ((-1) ** torch.arange(N, device=device, dtype=dtype))
@@ -85,16 +85,16 @@ def get_clenshaw_curtis_weights(N, device='mps', dtype=torch.float32) -> torch.T
 
 
 # Weights for cheb nodes interpolation
-def barycentric_weights_cheb(x_k):
+def barycentric_weights_cheb(x_k, device='mps', dtype=torch.float32):
     N = len(x_k)  # Number of nodes
-    w = torch.ones(N, device=x_k.device, dtype=x_k.dtype)
+    w = torch.ones(N, device=x_k.device, dtype=dtype)
     w[0], w[-1] = 0.5, 0.5  # Endpoints get weight 0.5
-    w *= torch.pow(-1, torch.arange(N, device=x_k.device))
+    w *= torch.pow(-1, torch.arange(N, device=device))
     return w
 
 
 # Barycentric interpolation
-def barycentric_interpolate_eval(x_k, f_k, x_eval, barycentric_weights, eps=1e-6):
+def barycentric_interpolate_eval(x_k, f_k, x_eval, barycentric_weights, device='mps', dtype=torch.float32, eps=1e-6):
     """
     Barycentric interpolation similar to Rust implementation.
     Assumes:
@@ -114,7 +114,7 @@ def barycentric_interpolate_eval(x_k, f_k, x_eval, barycentric_weights, eps=1e-6
     row_has_match = zero_mask.any(dim=1)  # Shape (M,)
 
     # Initialize result
-    interp = torch.zeros(x_eval.shape[0], dtype=x_eval.dtype, device=x_eval.device)
+    interp = torch.zeros(x_eval.shape[0], dtype=dtype, device=device)
     # Handle exact matches first: if x_eval == x_k, return f_k directly
     if row_has_match.any():
         # For each evaluation point with an exact match, find the matching node
@@ -162,9 +162,9 @@ def barycentric_interpolate_eval(x_k, f_k, x_eval, barycentric_weights, eps=1e-6
     return interp
 
 
-def apply_barycentric_interpolate(x_sens, x_eval, barycentric_weights, u_pred, d2u):
-    u_eval = barycentric_interpolate_eval(x_sens.view(-1), u_pred.view(-1), x_eval.view(-1), barycentric_weights)
-    d2u_eval = barycentric_interpolate_eval(x_sens.view(-1), d2u.view(-1), x_eval.view(-1), barycentric_weights)
+def apply_barycentric_interpolate(x_sens, x_eval, barycentric_weights, u_pred, d2u, device='mps', dtype=torch.float32):
+    u_eval = barycentric_interpolate_eval(x_sens.view(-1), u_pred.view(-1), x_eval.view(-1), barycentric_weights, device, dtype)
+    d2u_eval = barycentric_interpolate_eval(x_sens.view(-1), d2u.view(-1), x_eval.view(-1), barycentric_weights, device, dtype)
     return u_eval, d2u_eval
 
 
@@ -202,9 +202,11 @@ class DeepONet(nn.Module):
 
 
 def get_loss(u, f, x_N, x_M, D2, Q, f_M, k_val, barycentric_weights):
-    # d2u = (D2 @ u.T).T  
-    # d2u = torch.matmul(D2, u.unsqueeze(1)).squeeze(1)
+    # u  = u.to(torch.device("cpu"), dtype=torch.float64)
     d2u = torch.matmul(D2, u)
+    # u  = u.to(torch.device("cpu"), dtype=torch.float32)
+    # d2u  = u.to(torch.device("cpu"), dtype=torch.float32)
+
     u_flat = u.squeeze(0) if u.dim() > 1 and u.shape[0] == 1 else u.view(-1)
     f_flat = f.squeeze(0) if f.dim() > 1 and f.shape[0] == 1 else f.view(-1)
     d2u_flat = d2u.squeeze(0) if d2u.dim() > 1 and d2u.shape[0] == 1 else d2u.view(-1)
@@ -217,6 +219,7 @@ def get_loss(u, f, x_N, x_M, D2, Q, f_M, k_val, barycentric_weights):
     Y_exact = math.sqrt(len(x_M)) * Q * Lu
     Y_hat = math.sqrt(len(x_M)) * Q * f_M 
     loss = mse(Y_exact, Y_hat) 
+
     return loss
 
 
@@ -250,12 +253,13 @@ def validate_loss_of_solution(x_N, x_M, D2, Q, f_M, k_val, barycentric_weights, 
 
 def train_model(device, dtype, N_sensors, M_sensors, steps, lr, k_val, width, depth,
                 source_function_generation_strategy, forcing_function_type):
-    x_N = cheb_sensors(N_sensors).to(device)        # (N_sensors,) Chebyshev sensors
-    x_M = cheb_sensors(M_sensors).to(device)         # (M_sensors,) Chebyshev sensors (Clenshew Curtis)
+    x_N = cheb_sensors(N_sensors, device)        # (N_sensors,) Chebyshev sensors
+    x_M = cheb_sensors(M_sensors, device)         # (M_sensors,) Chebyshev sensors (Clenshew Curtis)
     barycentric_weights = barycentric_weights_cheb(x_N)
     f_N = forcing_function(x_N, forcing_function_type)
     f_M = forcing_function(x_M, forcing_function_type)
-    x, D = chebyshev_diff_matrix(N_sensors)   
+    x, D = chebyshev_diff_matrix(N_sensors, device, dtype)   
+    # x, D = chebyshev_diff_matrix(N_sensors, device='cpu', dtype=torch.float64)   
     D2 = torch.matmul(D, D)
     Q = get_clenshaw_curtis_weights(M_sensors)
 
