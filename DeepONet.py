@@ -37,7 +37,7 @@ if __name__ == '__main__':
     M_sensors   = 50     # number of Chebyshev sensors as quadrature points for Clenshaw Curtis Algorithm
     width       = 100     # feature width (branch/trunk)
     depth       = 3       # hidden layers in branch/trunk
-    steps       = 2000    # training steps
+    steps       = 4000    # training steps
     lr          = 1e-3    # learning rate
     k_val       = 5.0
 
