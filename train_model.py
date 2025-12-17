@@ -17,7 +17,7 @@ def print_diff(a, b):
     print(f"Mean difference: {torch.mean(torch.abs(a - b)).item():.6e}")
 
 
-def cheb_sensors(m, device='mps', dtype=torch.float32, a=-1.0, b=1.0):
+def cheb_sensors(m, device, dtype=torch.float64, a=-1.0, b=1.0):
     """
     Generate m Chebyshev nodes in descending order (from 1 to -1).
     For m nodes including endpoints: x_i = cos(i*π/(m-1)) for i=0,...,m-1
@@ -32,7 +32,7 @@ def cheb_sensors(m, device='mps', dtype=torch.float32, a=-1.0, b=1.0):
     return scaled_xi
 
 
-def chebyshev_diff_matrix(N, device='mps', dtype=torch.float32):
+def chebyshev_diff_matrix(N, device, dtype=torch.float64):
     # """
     # Compute Chebyshev differentiation matrix for N nodes.
     # Returns N nodes in descending order and (N, N) differentiation matrix.
@@ -62,7 +62,7 @@ def chebyshev_diff_matrix(N, device='mps', dtype=torch.float32):
 
 
 # Weights for applying clenshaw_curtis quadrature rule
-def get_clenshaw_curtis_weights(N, device='mps', dtype=torch.float32) -> torch.Tensor:
+def get_clenshaw_curtis_weights(N, device='mps', dtype=torch.float64) -> torch.Tensor:
     if N < 2:
         raise ValueError(f"n must be >= 2, got {N}")
 
@@ -85,7 +85,7 @@ def get_clenshaw_curtis_weights(N, device='mps', dtype=torch.float32) -> torch.T
 
 
 # Weights for cheb nodes interpolation
-def barycentric_weights_cheb(x_k, device='mps', dtype=torch.float32):
+def barycentric_weights_cheb(x_k, device='mps', dtype=torch.float64):
     N = len(x_k)  # Number of nodes
     w = torch.ones(N, device=x_k.device, dtype=dtype)
     w[0], w[-1] = 0.5, 0.5  # Endpoints get weight 0.5
@@ -94,7 +94,7 @@ def barycentric_weights_cheb(x_k, device='mps', dtype=torch.float32):
 
 
 # Barycentric interpolation
-def barycentric_interpolate_eval(x_k, f_k, x_eval, barycentric_weights, device='mps', dtype=torch.float32, eps=1e-6):
+def barycentric_interpolate_eval(x_k, f_k, x_eval, barycentric_weights, device='mps', dtype=torch.float64, eps=1e-6):
     """
     Barycentric interpolation similar to Rust implementation.
     Assumes:
@@ -162,7 +162,7 @@ def barycentric_interpolate_eval(x_k, f_k, x_eval, barycentric_weights, device='
     return interp
 
 
-def apply_barycentric_interpolate(x_sens, x_eval, barycentric_weights, u_pred, d2u, device='mps', dtype=torch.float32):
+def apply_barycentric_interpolate(x_sens, x_eval, barycentric_weights, u_pred, d2u, device='mps', dtype=torch.float64):
     u_eval = barycentric_interpolate_eval(x_sens.view(-1), u_pred.view(-1), x_eval.view(-1), barycentric_weights, device, dtype)
     d2u_eval = barycentric_interpolate_eval(x_sens.view(-1), d2u.view(-1), x_eval.view(-1), barycentric_weights, device, dtype)
     return u_eval, d2u_eval

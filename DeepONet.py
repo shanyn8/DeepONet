@@ -17,8 +17,8 @@ if __name__ == '__main__':
     device = ("cuda" if torch.cuda.is_available()
             else "mps" if getattr(torch.backends, 'mps', None) and torch.backends.mps.is_available()
             else "cpu")
-    dtype = torch.float32 if device == "mps" else torch.float64
-    torch.set_default_dtype(torch.float32)  #TODO float64
+    dtype = torch.float64
+    torch.set_default_dtype(torch.float64)  #TODO float64
 
     # device = 'cpu'
     # dtype = torch.float64
@@ -43,7 +43,7 @@ if __name__ == '__main__':
 
     # Branching of different strategies of the code
     source_function_generation_strategy = 'forcing_function'    # forcing_function|random_linear
-    forcing_function_type = 'polynomial'                             # sinus|polynomial
+    forcing_function_type = 'sinus'                             # sinus|polynomial
 
     train_model(device, dtype, N_sensors, M_sensors, steps, lr, k_val,
                 width, depth, source_function_generation_strategy, forcing_function_type)
